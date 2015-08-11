@@ -1,0 +1,179 @@
+#!/usr/bin/env ruby
+require 'optparse'
+
+class Git
+  attr_reader :raw_msg
+
+  def initialize(options = {})
+    @jira_number = options[:number]
+    @jira_prefix = options[:prefix]
+    @raw_msg     = options[:msg]
+  end
+
+  def branch
+    @branch ||= Branch.new
+  end
+
+  def add_all!
+    system 'git add -A .'
+  end
+
+  def message
+    jira_number ? "#{jira_prefix}-#{jira_number}: #{raw_msg}" : raw_msg
+  end
+
+  def commit!
+    system "git commit -v -m \"#{message}\""
+  end
+
+  def push!
+    status = system("git push origin #{branch.name}")
+    puts last_commit_url if status
+    status
+  end
+
+  def last_commit_id
+    @last_commit_id ||= `git rev-parse HEAD`.chomp
+  end
+
+  def last_commit_url
+    "#{remote_url}/commit/#{last_commit_id}"
+  end
+
+  def remote_url
+    @remote_url ||= create_remote_url
+  end
+
+  def jira_number
+    @jira_number ||= branch.jira_number
+  end
+
+  def jira_prefix
+    @jira_prefix ||= branch.jira_prefix || github_org_name
+  end
+
+  private
+
+  def create_remote_url
+    raw_remote_url = `git ls-remote --get-url`.chomp
+    convert_ssh_url_to_http_url(raw_remote_url).chomp('.git')
+  end
+
+  def convert_ssh_url_to_http_url(raw_remote_url)
+    return raw_remote_url unless raw_remote_url.start_with?('git@')
+
+    _, base_url, org_slash_repo = raw_remote_url.split(/@(.*):/)
+    "http://#{base_url}/#{org_slash_repo}"
+  end
+
+  def github_org_name
+    org_name = remote_url.split('/')[-2]
+    org_name && org_name.upcase
+  end
+end
+
+class Branch
+  def name
+    @name ||= `git symbolic-ref --short HEAD`.chomp
+  end
+
+  def jira_prefix
+    @jira_prefix ||= jira[:prefix]
+  end
+
+  def jira_number
+    @jira_number ||= jira[:num]
+  end
+
+  private
+
+  def jira
+    prefix_or_jira_num, jira_num, _ = name.split('-', 3)
+
+    if number?(prefix_or_jira_num) # assuming branch name format => NUM-my-description
+      {
+        prefix: nil,
+        num: prefix_or_jira_num
+      }
+    elsif number?(jira_num) # assuming branch name format => PREFIX-NUM-my-description
+      {
+        prefix: prefix_or_jira_num,
+        num: jira_num
+      }
+    else # invalid branch naming format
+      {
+        prefix: nil,
+        num: nil
+      }
+    end
+  end
+
+  def number?(num)
+    !!Float(num) rescue false
+  end
+end
+
+class CommandLine
+  attr_reader :options, :git
+  def initialize
+    @options = cmd_options
+    @git = Git.new(@options)
+  end
+
+  def run
+    git.add_all! if options[:add_all]
+    git.commit! if options[:msg]
+    git.push! if options[:push]
+    copy_and_open!(git.last_commit_url) if options[:open]
+  end
+
+  def copy_and_open!(url)
+    system "echo '#{url}' | pbcopy"
+    system "open #{url}"
+  end
+
+  def cmd_options
+    options = {}
+    opt_parser = OptionParser.new do |opts|
+      opts.banner = 'Usage: qg "commit message"'
+
+      opts.on('-a', '--all', 'automatically stage files that have been modified, added or deleted') do
+        options[:add_all] = true
+      end
+
+      opts.on('-h','--help','Prints help message') do
+        puts opt_parser.help
+      end
+
+      opts.on('-m', '--message=<msg>', "Uses the given <msg> as the commit message. Uses '<prefix>-<number> <msg>' as the commit message format") do |message|
+        options[:msg] = message
+      end
+
+      opts.on('-n', '--number=<number>', "Uses the given <number> as part of the commit message. The commit message format will be '<prefix>-<number> <msg>'") do |number|
+        options[:number] = jira_num
+      end
+
+      opts.on('-o', '--open', '(OS X Only) Opens commit url in browser and copies the url to clipboard') do
+        options[:open] = true
+      end
+
+      opts.on('-p', '--push', 'Push commits to remote') do
+        options[:push] = true
+      end
+
+      opts.on('-r', '--prefix=<prefix>', "Uses the given <prefix> as part of the commit message. The commit message format will be '<prefix>-<NUMBER> <msg>'") do |prefix|
+        options[:prefix] = prefix
+      end
+    end
+    opt_parser.parse!
+
+    # after all this parsing if only one arg is left assume it's the message
+    options[:msg] = ARGV[0] if !options.has_key?(:msg) && ARGV.size == 1
+
+    options
+  end
+end
+
+if __FILE__ == $PROGRAM_NAME
+  CommandLine.new.run
+end
